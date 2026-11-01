@@ -18,13 +18,35 @@ from google.adk.tools import FunctionTool
 from . import catalog, trace
 from .mandate import Mandate, OK, NEEDS_HUMAN_APPROVAL
 
-# One mandate per demo session.
+# One mandate per demo session, plus the terms the human last authored.
+# The template is what gets re-issued at the start of every act, which is how
+# editing the mandate actually changes what the agent is able to do.
 _MANDATES: dict[str, Mandate] = {}
+_TEMPLATES: dict[str, dict] = {}
+
+EDITABLE = (
+    "total_budget", "per_txn_cap", "auto_approve_below",
+    "max_delivery_days", "excluded_materials",
+)
+
+
+def template_for(session_id: str) -> dict:
+    if session_id not in _TEMPLATES:
+        d = Mandate()
+        _TEMPLATES[session_id] = {k: getattr(d, k) for k in EDITABLE}
+    return _TEMPLATES[session_id]
+
+
+def set_template(session_id: str, terms: dict) -> dict:
+    t = dict(template_for(session_id))
+    t.update({k: v for k, v in terms.items() if k in EDITABLE})
+    _TEMPLATES[session_id] = t
+    return t
 
 
 def mandate_for(session_id: str) -> Mandate:
     if session_id not in _MANDATES:
-        _MANDATES[session_id] = Mandate()
+        _MANDATES[session_id] = Mandate(**template_for(session_id))
     return _MANDATES[session_id]
 
 
@@ -33,8 +55,10 @@ def current_mandate() -> Mandate:
 
 
 def reset_mandate(session_id: str) -> Mandate:
-    _MANDATES[session_id] = Mandate()
-    return _MANDATES[session_id]
+    """Issue a fresh mandate on the human's current terms."""
+    m = Mandate(**template_for(session_id))
+    _MANDATES[session_id] = m
+    return m
 
 
 # --------------------------------------------------------------------------

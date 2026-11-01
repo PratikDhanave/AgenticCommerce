@@ -46,7 +46,20 @@ export type Item =
   | { k: 'cards'; id: string; label: string; items: Product[]
       highlight?: string; dead?: string }
 
-export interface Act { id: string; title: string; beat: string; prompt: string }
+export interface Act {
+  id: string; title: string; beat: string; prompt: string
+  /** The SKU this act hinges on, used to preview what the terms would do. */
+  focus?: string
+}
+
+/** The terms a human grants the agent. Editable before a run. */
+export interface Terms {
+  total_budget: number
+  per_txn_cap: number
+  auto_approve_below: number
+  max_delivery_days: number
+  excluded_materials: string[]
+}
 
 export type RunStatus = 'idle' | 'running' | 'awaiting_human' | 'done'
 

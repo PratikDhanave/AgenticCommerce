@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Audit, Checks, Gate, Lane, MandateCard, ReceiptCard, Verdict, useAutoScroll,
+  Audit, Checks, Gate, Lane, MandateCard, MandateEditor, ReceiptCard, Verdict,
+  useAutoScroll,
 } from './components'
 import { useRun } from './useRun'
 import { useListening, useSpeech, type Intent } from './useVoice'
@@ -30,13 +31,16 @@ export default function App() {
     else if (e.kind === 'user_message') speakRef.current(e.text, 'human')
   }, [])
 
-  const { state, acts, liveAvailable, run, stop, reset, approve } =
+  const { state, acts, liveAvailable, run, stop, reset, approve,
+          terms, defaults, materials, products, saveTerms } =
     useRun('demo', onEvent)
+  const [editing, setEditing] = useState(false)
 
   const busy = state.status === 'running' || state.status === 'awaiting_human'
 
   const start = useCallback((which = act) => {
     if (busy) return
+    setEditing(false)      // the terms are granted at run start, not during
     voice.cancel()
     run(which, mode, voiceOn)
   }, [busy, run, act, mode, voiceOn, voice])
@@ -93,6 +97,8 @@ export default function App() {
         voice.setOn(v => !v)
       } else if (k === 'z') {
         cycleZoom()
+      } else if (k === 'e' && !busy) {
+        setEditing(v => !v)
       } else if (k === 'r') {
         resetAll()
       } else if (e.key === 'Escape') {
@@ -210,6 +216,7 @@ export default function App() {
                   <span className="k">3</span> acts ·{' '}
                   <span className="k">A</span> approve ·{' '}
                   <span className="k">V</span> voice ·{' '}
+                  <span className="k">E</span> terms ·{' '}
                   <span className="k">Z</span> zoom ·{' '}
                   <span className="k">R</span> reset
                 </div>
@@ -226,11 +233,25 @@ export default function App() {
             </div>
           </div>
           <div className="pane-body" ref={midRef}>
-            {state.mandate
-              ? <MandateCard m={state.mandate} />
+            {editing && terms
+              ? <MandateEditor
+                  terms={terms} defaults={defaults} materials={materials}
+                  focus={products.find(p => p.sku === current?.focus)}
+                  busy={busy} onSave={saveTerms}
+                  onCancel={() => setEditing(false)} />
+              : state.mandate
+              ? <MandateCard m={state.mandate} canEdit={!busy}
+                             onEdit={() => setEditing(true)} />
               : <div className="empty">
                   No mandate issued yet.<br />
                   This pane is the only thing that can say no.
+                  {terms && (
+                    <><br /><br />
+                      <button className="btn btn-ghost"
+                              onClick={() => setEditing(true)}>
+                        Set the terms
+                      </button></>
+                  )}
                 </div>}
 
             {state.approval && !state.approvalResolved && (

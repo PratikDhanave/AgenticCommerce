@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
-  AgentName, Approval, AuditEntry, Decision, Item, MandateState, Receipt,
+  AgentName, Approval, AuditEntry, Decision, Item, MandateState, Product,
+  Receipt, Terms,
 } from './types'
 
 export const inr = (n: number) => '₹' + n.toLocaleString('en-IN')
@@ -143,12 +144,24 @@ export function Lane({ items }: { items: Item[] }) {
   )
 }
 
-export function MandateCard({ m }: { m: MandateState }) {
+export function MandateCard(
+  { m, onEdit, canEdit }:
+  { m: MandateState; onEdit?: () => void; canEdit?: boolean },
+) {
   const used = m.total_budget ? m.spent / m.total_budget : 0
   const cls = used >= 1 ? 'full' : used > 0.75 ? 'warn' : ''
   return (
     <div className="mcard">
-      <h3><Avatar who="mandate" /> Spending mandate</h3>
+      <h3>
+        <Avatar who="mandate" /> Spending mandate
+        {onEdit && (
+          <button className="edit" onClick={onEdit} disabled={!canEdit}
+                  title={canEdit ? 'Change what the agent is allowed to do (E)'
+                                 : 'Stop the run to change the terms'}>
+            Edit terms
+          </button>
+        )}
+      </h3>
       <div className="id">{m.mandate_id}</div>
 
       <div className="meter">
@@ -309,5 +322,158 @@ export function Audit({ entries }: { entries: AuditEntry[] }) {
         })}
       </div>
     </>
+  )
+}
+
+/* ---------------------------------------------------------------- mandate editor */
+
+/** What these terms would do to one item, worked out client-side.
+ *  Mirrors mandate.evaluate() so the human sees the consequence of the
+ *  authority before granting it, not after the agent acts on it. */
+function preview(t: Terms, p: Product): { code: string; label: string; tone: string } {
+  if (p.stock <= 0)
+    return { code: 'OUT_OF_STOCK', label: 'out of stock', tone: 'block' }
+  if (t.excluded_materials.includes(p.material))
+    return { code: 'MATERIAL_EXCLUDED', label: `${p.material} is excluded`, tone: 'block' }
+  if (p.delivery_days > t.max_delivery_days)
+    return { code: 'DELIVERY_TOO_SLOW', label: `${p.delivery_days}d exceeds your window`, tone: 'block' }
+  if (p.price > t.per_txn_cap)
+    return { code: 'EXCEEDS_TXN_CAP', label: 'over the per-transaction cap', tone: 'block' }
+  if (p.price > t.total_budget)
+    return { code: 'EXCEEDS_BUDGET', label: 'over the total budget', tone: 'block' }
+  if (p.price > t.auto_approve_below)
+    return { code: 'NEEDS_HUMAN_APPROVAL', label: 'would stop and ask you', tone: 'hold' }
+  return { code: 'OK', label: 'agent would buy it without asking', tone: 'allow' }
+}
+
+const FIELDS: { key: keyof Terms; label: string; hint: string; step: number }[] = [
+  { key: 'total_budget',      label: 'Total budget',      hint: 'across the whole mandate', step: 100 },
+  { key: 'per_txn_cap',       label: 'Per-transaction cap', hint: 'the hard ceiling on any one purchase', step: 100 },
+  { key: 'auto_approve_below', label: 'Ask me above',     hint: 'below this the agent acts alone', step: 100 },
+]
+
+export function MandateEditor(
+  { terms, defaults, materials, focus, onSave, onCancel, busy }: {
+    terms: Terms
+    defaults: Terms | null
+    materials: string[]
+    focus?: Product
+    onSave: (t: Terms) => Promise<string | null>
+    onCancel: () => void
+    busy: boolean
+  },
+) {
+  const [draft, setDraft] = useState<Terms>(terms)
+  const [err, setErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // Mirror the server's coherence rules so the human is told immediately,
+  // not after a round trip.
+  const local =
+    draft.per_txn_cap > draft.total_budget
+      ? 'Cap is above the budget — the agent could never use the headroom.'
+      : draft.auto_approve_below > draft.per_txn_cap
+      ? 'Ask-me threshold is above the cap — nothing would ever pause for you.'
+      : null
+
+  const set = (k: keyof Terms, v: number) =>
+    setDraft(d => ({ ...d, [k]: Math.max(0, v) }))
+
+  const toggle = (m: string) =>
+    setDraft(d => ({
+      ...d,
+      excluded_materials: d.excluded_materials.includes(m)
+        ? d.excluded_materials.filter(x => x !== m)
+        : [...d.excluded_materials, m],
+    }))
+
+  const save = async () => {
+    if (local) { setErr(local); return }
+    setSaving(true)
+    const e = await onSave(draft)
+    setSaving(false)
+    setErr(e)
+    if (!e) onCancel()
+  }
+
+  const pv = focus ? preview(draft, focus) : null
+  const dirty = JSON.stringify(draft) !== JSON.stringify(terms)
+
+  return (
+    <div className="mcard editor">
+      <h3><Avatar who="human" /> Grant authority</h3>
+      <p className="lede">
+        These are the terms the agent gets at the start of the next act.
+        It cannot change them.
+      </p>
+
+      <div className="fields">
+        {FIELDS.map(f => (
+          <label key={f.key} className="field">
+            <span className="fl">{f.label}</span>
+            <span className="fh">{f.hint}</span>
+            <span className="fin">
+              <span className="cur">₹</span>
+              <input type="number" min={0} step={f.step} disabled={busy}
+                     value={draft[f.key] as number}
+                     onChange={e => set(f.key, Number(e.target.value))} />
+            </span>
+          </label>
+        ))}
+
+        <label className="field">
+          <span className="fl">Delivery window</span>
+          <span className="fh">reject anything slower</span>
+          <span className="fin">
+            <input type="number" min={1} max={30} step={1} disabled={busy}
+                   value={draft.max_delivery_days}
+                   onChange={e => set('max_delivery_days', Number(e.target.value))} />
+            <span className="cur suf">days</span>
+          </span>
+        </label>
+      </div>
+
+      <div className="sect">Materials the agent may not buy</div>
+      <div className="chips">
+        {materials.map(m => {
+          const on = draft.excluded_materials.includes(m)
+          return (
+            <button key={m} type="button" disabled={busy}
+                    className={`chip${on ? ' on' : ''}`}
+                    aria-pressed={on} onClick={() => toggle(m)}>
+              {m}
+            </button>
+          )
+        })}
+      </div>
+
+      {pv && (
+        <div className={`pv ${pv.tone}`}>
+          <span className="pvl">On these terms</span>
+          <span className="pvb">
+            <strong>{focus!.title}</strong> at {inr(focus!.price)} — {pv.label}
+          </span>
+          <span className="code">{pv.code}</span>
+        </div>
+      )}
+
+      {(err || local) && <div className="err">{err ?? local}</div>}
+
+      <div className="erow">
+        <button className="btn btn-primary" onClick={save}
+                disabled={busy || saving || !!local || !dirty}>
+          {saving ? 'Issuing…' : 'Issue mandate'}
+        </button>
+        <button className="btn btn-ghost" onClick={onCancel} disabled={saving}>
+          Cancel
+        </button>
+        {defaults && (
+          <button className="btn btn-ghost rst" disabled={busy || saving}
+                  onClick={() => { setDraft(defaults); setErr(null) }}>
+            Defaults
+          </button>
+        )}
+      </div>
+    </div>
   )
 }

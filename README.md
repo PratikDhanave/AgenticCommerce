@@ -20,6 +20,7 @@ Built on [Google ADK](https://google.github.io/adk-docs/) for the
 - [Quick start](#quick-start)
 - [How to drive it](#how-to-drive-it)
 - [The three acts](#the-three-acts)
+- [Granting authority](#granting-authority)
 - [Replay mode vs live mode](#replay-mode-vs-live-mode)
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
@@ -109,6 +110,7 @@ stage.
 | `Enter` / `Space` | Run the selected act |
 | `M` | Talk to it (push to talk) |
 | `A` | Approve the pending charge |
+| `E` | Edit the mandate terms |
 | `V` | Mute / unmute the agent voices |
 | `Z` | Cycle UI scale — 100% / 115% / 130% for a projector |
 | `R` | Reset |
@@ -185,6 +187,50 @@ control rather than satisfying it.
 
 **This is the act to spend time on.** If an agent would have said yes there,
 you do not have a spending control. You have a suggestion.
+
+---
+
+## Granting authority
+
+The mandate is editable. Press `E` or hit **Edit terms** in the centre pane to
+open the delegation surface — budget, per-transaction cap, the ask-me-first
+ceiling, the delivery window, and which materials the agent may not buy.
+
+![Granting authority](docs/screenshots/07-grant-authority.png)
+
+Three things make this more than a settings form:
+
+**It previews the consequence before you grant it.** As you move the numbers,
+the panel tells you what these terms would do to the item the selected act
+hinges on — *"Pashmina Shawl at ₹4,200 — over the per-transaction cap"*. You
+see the effect of the authority before the agent acts on it, not after.
+
+**It refuses incoherent terms.** A cap above the budget, or an ask-me ceiling
+above the cap, is rejected with the reason — *"nothing would ever pause for
+you"*. An agent cannot sensibly act on a contradictory mandate.
+
+**Re-issuing is itself an authorisation.** It lands in the audit trail as
+`Priya (human) · issue_mandate`, alongside everything the agent did.
+
+### The demo move
+
+Run act 3 on the default terms and watch the agent refuse the ₹4,200 shawl.
+Then raise the per-transaction cap to ₹5,000, re-issue, and run the same act
+again. It buys it — and says so:
+
+> *"Worth saying plainly: nothing about me changed between the refusal and
+> this purchase. You changed the mandate."*
+
+![The same act after re-issuing the mandate](docs/screenshots/08-reissued.png)
+
+That is the argument in one gesture. The agent's behaviour is a function of
+the authority it was granted, and the authority is a thing a human edits.
+
+Scripted prose never hardcodes a mandate number — `{cap}`, `{ceiling}`,
+`{budget}` and `{remaining}` are filled from the mandate as it stands — and
+each act branches on the live verdict, so an edited mandate changes what the
+agent says and whether the purchase completes, not just the badge in the
+centre pane.
 
 ---
 
@@ -304,6 +350,8 @@ DEMO_VOICE_WPM=150 DEMO_STEP_PAUSE=0.6 ./run.sh
 | `GET /api/acts` | Act metadata |
 | `GET /api/catalog` | All 20 products |
 | `GET /api/mandate` | Current mandate state |
+| `GET /api/mandate/terms` | Terms for the next act, factory defaults, known materials |
+| `POST /api/mandate/terms` | Grant new terms; validates coherence, re-issues, logs to audit |
 | `GET /api/stream` | SSE event stream — `?act=&mode=&voice=` |
 | `POST /api/approve` | Resolves a pending approval — `?approved=` |
 
@@ -318,7 +366,7 @@ agents/                 Google ADK backend
                         signed receipts, append-only audit
   tools.py              ADK FunctionTools; execute_payment re-checks the mandate
   catalog.py            20 in-memory products, no network
-  script.py             the three acts' pre-written prose
+  script.py             the three acts: templated prose, verdict-branched steps
   server.py             FastAPI + SSE; replay and live backends, model chain
   trace.py              in-process bus for semantic UI events
 

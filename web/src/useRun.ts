@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Act, Decision, Item, Product, RunState } from './types'
+import type { Act, Decision, Item, Product, RunState, Terms } from './types'
 
 const EMPTY: RunState = {
   status: 'idle', mode: 'replay', left: [], right: [], decisions: [],
@@ -23,6 +23,10 @@ export function useRun(
   tap.current = onEvent
   const [acts, setActs] = useState<Act[]>([])
   const [liveAvailable, setLiveAvailable] = useState(false)
+  const [terms, setTerms] = useState<Terms | null>(null)
+  const [defaults, setDefaults] = useState<Terms | null>(null)
+  const [materials, setMaterials] = useState<string[]>([])
+  const [products, setProducts] = useState<Product[]>([])
   const es = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -30,7 +34,30 @@ export function useRun(
       .then(d => setActs(d.acts)).catch(() => {})
     fetch('/api/health').then(r => r.json())
       .then(d => setLiveAvailable(!!d.live_available)).catch(() => {})
-  }, [])
+    fetch('/api/catalog').then(r => r.json())
+      .then(d => setProducts(d.items)).catch(() => {})
+    fetch(`/api/mandate/terms?session=${session}`).then(r => r.json())
+      .then(d => { setTerms(d.terms); setDefaults(d.defaults); setMaterials(d.materials) })
+      .catch(() => {})
+  }, [session])
+
+  /** Grant the agent a new set of terms. Returns an error string, or null. */
+  const saveTerms = useCallback(async (next: Terms): Promise<string | null> => {
+    try {
+      const r = await fetch(`/api/mandate/terms?session=${session}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      })
+      const d = await r.json()
+      if (!r.ok) return d?.detail ?? 'Could not issue those terms.'
+      setTerms(d.terms)
+      setState(s => ({ ...s, mandate: d.mandate }))
+      return null
+    } catch {
+      return 'Could not reach the server.'
+    }
+  }, [session])
 
   const stop = useCallback(() => {
     es.current?.close()
@@ -75,7 +102,8 @@ export function useRun(
 
   useEffect(() => () => es.current?.close(), [])
 
-  return { state, acts, liveAvailable, run, stop, reset, approve }
+  return { state, acts, liveAvailable, run, stop, reset, approve,
+           terms, defaults, materials, products, saveTerms }
 }
 
 function push(s: RunState, side: 'left' | 'right', item: Item): RunState {

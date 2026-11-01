@@ -18,14 +18,18 @@ import pathlib
 import re
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import catalog, trace
+from .mandate import NEEDS_HUMAN_APPROVAL
+from .mandate import Mandate as _Mandate
 from .script import ACTS
 from .tools import (
+    EDITABLE,
     check_against_mandate,
     execute_payment,
     get_product,
@@ -33,6 +37,8 @@ from .tools import (
     read_mandate,
     reset_mandate,
     search_catalog,
+    set_template,
+    template_for,
     suggest_alternative,
 )
 
@@ -55,6 +61,8 @@ def _load_env() -> None:
 
 _load_env()
 
+
+_DEFAULT_MANDATE = _Mandate()
 
 app = FastAPI(title="Agentic Commerce — Pune Product × GCC Forum")
 app.add_middleware(
@@ -97,6 +105,46 @@ def inr(n: int) -> str:
     return "₹" + f"{n:,}"
 
 
+def fill(text: str, mandate, sku: str | None = None) -> str:
+    """Resolve {placeholders} against the mandate as it stands right now.
+
+    Pre-written prose must never hardcode a mandate number, or it contradicts
+    the centre pane the moment someone edits the terms on stage.
+    """
+    return text.format(
+        budget=inr(mandate.total_budget),
+        cap=inr(mandate.per_txn_cap),
+        ceiling=inr(mandate.auto_approve_below),
+        remaining=inr(mandate.remaining),
+        delivery=mandate.max_delivery_days,
+        excluded=", ".join(mandate.excluded_materials) or "nothing",
+    )
+
+
+def verdict_for(mandate, sku: str) -> str:
+    """Live verdict for the act's focus item: auto | needs_approval | blocked."""
+    p = catalog.BY_SKU.get(sku)
+    if p is None:
+        return "blocked"
+    d = mandate.evaluate(p.price, p.title, p.material, p.delivery_days, p.stock)
+    if d.allowed:
+        return "auto"
+    if d.code == NEEDS_HUMAN_APPROVAL:
+        return "needs_approval"
+    return "blocked"
+
+
+def step_runs(step: dict, verdict: str, paid: bool) -> bool:
+    when = step.get("when")
+    if when is None:
+        return True
+    if when == "paid":
+        return paid
+    if when == "not_blocked":
+        return verdict != "blocked"
+    return when == verdict
+
+
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -126,25 +174,32 @@ async def run_replay(session_id: str, act_id: str, voice: bool = False):
     await asyncio.sleep(STEP_PAUSE)
 
     call_n = 0
+    paid = False
+    focus = act.get("focus")
     for step in act["steps"]:
+        # Re-evaluated every step: the human can edit the mandate between runs,
+        # and the agent's own spending moves it mid-run.
+        verdict = verdict_for(mandate, focus) if focus else "auto"
+        if not step_runs(step, verdict, paid):
+            continue
         kind = step["t"]
 
         if kind == "user":
             # Mid-act buyer lines are part of the scene, so these do get voiced.
-            yield sse({"kind": "user_message", "text": step["text"],
-                       "speak": voice})
+            text = fill(step["text"], mandate)
+            yield sse({"kind": "user_message", "text": text, "speak": voice})
             await asyncio.sleep(
-                speech_seconds(step["text"]) + VOICE_TAIL if voice
-                else STEP_PAUSE * 1.6)
+                speech_seconds(text) + VOICE_TAIL if voice else STEP_PAUSE * 1.6)
 
         elif kind == "a2a":
             yield sse({"kind": "a2a_message", "frm": step["frm"],
-                       "to": step["to"], "text": step["text"]})
+                       "to": step["to"],
+                       "text": fill(step["text"], mandate)})
             await asyncio.sleep(STEP_PAUSE)
 
         elif kind == "say":
             agent = step["agent"]
-            text = step["text"]
+            text = fill(step["text"], mandate)
             yield sse({"kind": "agent_thinking", "agent": agent})
             await asyncio.sleep(STEP_PAUSE * 1.3)
             # The client starts speaking on _start, so it needs the whole turn
@@ -169,6 +224,8 @@ async def run_replay(session_id: str, act_id: str, voice: bool = False):
 
             # Real tool, real mandate. Only the prose above is pre-written.
             result = TOOL_FNS[tool](**step["args"])
+            if tool == "execute_payment":
+                paid = bool(result.get("paid"))
 
             # Drain whatever semantic events the tool emitted.
             q = trace.queue_for(session_id)
@@ -182,12 +239,12 @@ async def run_replay(session_id: str, act_id: str, voice: bool = False):
 
         elif kind == "approval":
             p = catalog.BY_SKU[step["sku"]]
-            m_auto = mandate.auto_approve_below
+            m_auto = inr(mandate.auto_approve_below)
             ev = asyncio.Event()
             _approvals[session_id] = ev
             yield sse({"kind": "approval_required", "sku": p.sku,
                        "title": p.title, "amount": p.price,
-                       "reason": f"Above the {inr(m_auto)} auto-approve ceiling.",
+                       "reason": f"Above the {m_auto} auto-approve ceiling.",
                        "speak": voice, "mandate": mandate.as_dict()})
             # Keep the connection warm while the room watches the presenter.
             waited = 0.0
@@ -359,7 +416,7 @@ def acts() -> dict:
     return {
         "acts": [
             {"id": k, "title": v["title"], "beat": v["beat"],
-             "prompt": v["prompt"]}
+             "prompt": v["prompt"], "focus": v.get("focus")}
             for k, v in ACTS.items()
         ]
     }
@@ -382,6 +439,56 @@ def approve(session: str = "demo", approved: bool = True) -> dict:
     if ev is not None:
         ev.set()
     return {"ok": True, "approved": approved}
+
+
+
+class MandateTerms(BaseModel):
+    """The terms a human can grant an agent.
+
+    Bounds are generous on purpose — the demo is more interesting when someone
+    can set a deliberately silly mandate and watch the agent obey it. What is
+    *not* allowed is an incoherent mandate, because an agent cannot sensibly
+    act on one and the error teaches more than a silent clamp.
+    """
+
+    total_budget: int = Field(ge=100, le=1_000_000)
+    per_txn_cap: int = Field(ge=100, le=1_000_000)
+    auto_approve_below: int = Field(ge=0, le=1_000_000)
+    max_delivery_days: int = Field(ge=1, le=30)
+    excluded_materials: list[str] = Field(default_factory=list, max_length=12)
+
+
+@app.get("/api/mandate/terms")
+def get_terms(session: str = "demo") -> dict:
+    """The terms that will be issued at the start of the next act."""
+    return {
+        "terms": template_for(session),
+        "defaults": {k: getattr(_DEFAULT_MANDATE, k) for k in EDITABLE},
+        "materials": sorted({p.material for p in catalog.CATALOG}),
+    }
+
+
+@app.post("/api/mandate/terms")
+def put_terms(terms: MandateTerms, session: str = "demo") -> dict:
+    if terms.per_txn_cap > terms.total_budget:
+        raise HTTPException(422, "Per-transaction cap cannot exceed total budget. "
+                                 "The agent could never use the headroom.")
+    if terms.auto_approve_below > terms.per_txn_cap:
+        raise HTTPException(422, "Auto-approve ceiling cannot exceed the "
+                                 "per-transaction cap. Nothing would ever pause "
+                                 "for you.")
+    known = {p.material for p in catalog.CATALOG}
+    unknown = [m for m in terms.excluded_materials if m not in known]
+    if unknown:
+        raise HTTPException(422, f"Unknown material(s): {', '.join(unknown)}")
+
+    t = set_template(session, terms.model_dump())
+    # Re-issuing is itself an act of authorisation, so it belongs in the trail.
+    m = reset_mandate(session)
+    m.log("Priya (human)", "issue_mandate",
+          f"budget {inr(m.total_budget)}, cap {inr(m.per_txn_cap)}, "
+          f"ask above {inr(m.auto_approve_below)}")
+    return {"ok": True, "terms": t, "mandate": m.as_dict()}
 
 
 @app.get("/api/stream")
