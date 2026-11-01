@@ -44,7 +44,7 @@ export type Item =
       args: Record<string, unknown>; result?: unknown; done: boolean }
   | { k: 'a2a'; id: string; frm: string; to: string; text: string }
   | { k: 'cards'; id: string; label: string; items: Product[]
-      highlight?: string; dead?: string }
+      highlight?: string }
 
 export interface Act {
   id: string; title: string; beat: string; prompt: string

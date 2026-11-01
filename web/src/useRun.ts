@@ -207,8 +207,7 @@ function reduce(s: RunState, e: any): RunState {
     case 'product_lookup':
       return push(s, 'right', {
         k: 'cards', id: nid(), label: 'Live stock lookup',
-        items: [e.item as Product],
-        dead: (e.item as Product).stock === 0 ? e.item.sku : undefined })
+        items: [e.item as Product] })
 
     case 'alternatives_offered':
       return push(s, 'right', {

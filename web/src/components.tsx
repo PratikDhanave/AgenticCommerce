@@ -340,7 +340,7 @@ function preview(t: Terms, p: Product): { code: string; label: string; tone: str
   if (p.price > t.per_txn_cap)
     return { code: 'EXCEEDS_TXN_CAP', label: 'over the per-transaction cap', tone: 'block' }
   if (p.price > t.total_budget)
-    return { code: 'EXCEEDS_BUDGET', label: 'over the total budget', tone: 'block' }
+    return { code: 'EXCEEDS_REMAINING_BUDGET', label: 'over the total budget', tone: 'block' }
   if (p.price > t.auto_approve_below)
     return { code: 'NEEDS_HUMAN_APPROVAL', label: 'would stop and ask you', tone: 'hold' }
   return { code: 'OK', label: 'agent would buy it without asking', tone: 'allow' }

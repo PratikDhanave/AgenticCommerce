@@ -65,9 +65,18 @@ _load_env()
 _DEFAULT_MANDATE = _Mandate()
 
 app = FastAPI(title="Agentic Commerce — Pune Product × GCC Forum")
+# Same-origin in production (the server hosts the built UI). The explicit
+# localhost entries exist only for the Vite dev server. A wildcard here would
+# let any page the presenter has open POST to /api/approve — a poor look in a
+# demo whose entire subject is scoped authority.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:8000", "http://127.0.0.1:8000",
+    ],
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type"],
 )
 
 # session_id -> asyncio.Event set when the human taps approve/deny
@@ -105,7 +114,7 @@ def inr(n: int) -> str:
     return "₹" + f"{n:,}"
 
 
-def fill(text: str, mandate, sku: str | None = None) -> str:
+def fill(text: str, mandate) -> str:
     """Resolve {placeholders} against the mandate as it stands right now.
 
     Pre-written prose must never hardcode a mandate number, or it contradicts
@@ -266,7 +275,12 @@ async def run_replay(session_id: str, act_id: str, voice: bool = False):
                        "mandate": mandate.as_dict()})
             return
 
-    yield sse({"kind": "run_finished", "status": "completed",
+    # An act can now end without a purchase because the human tightened the
+    # terms, not because the script said so. Report what actually happened
+    # rather than calling an unspent run "completed".
+    ended_blocked = bool(focus) and not paid and verdict_for(mandate, focus) == "blocked"
+    yield sse({"kind": "run_finished",
+               "status": "blocked_by_mandate" if ended_blocked else "completed",
                "mandate": mandate.as_dict()})
 
 
@@ -406,7 +420,7 @@ def health() -> dict:
         "live_available": bool(
             os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
         ),
-        "model": os.environ.get("ADK_MODEL", "gemini-3.6-flash"),
+        "model": MODEL_CHAIN[0],
         "catalog_size": len(catalog.CATALOG),
     }
 
